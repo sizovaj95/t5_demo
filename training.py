@@ -2,17 +2,20 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from transformers import T5ForConditionalGeneration, T5Tokenizer
 import json
-import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 import time
+from datetime import datetime as dt
 
 
-t5_model = "t5-base"
-max_input_len = 1024
-max_output_len = 50
-random_seed = 42
+EPOCHS = 3
+TRAIN_FRACTION = 0.8
+MODEL_NAME = "t5-base"
+MAX_INPUT_LEN = 1024
+MAX_OUTPUT_LEN = 128
+RANDOM_SEED = 42
+BATCH_SIZE = 8
 
 
 class ReviewsDataset(Dataset):
@@ -27,9 +30,9 @@ class ReviewsDataset(Dataset):
         review = "summarize: " + self.reviews.iloc[idx]['review']
         summary = self.reviews.iloc[idx]['summary']
 
-        encoded_input = self.tokenizer([review], max_length=max_input_len, pad_to_max_length=True, truncation=True,
+        encoded_input = self.tokenizer([review], max_length=MAX_INPUT_LEN, pad_to_max_length=True, truncation=True,
                                        padding="max_length", return_tensors="pt")
-        encoded_output = self.tokenizer([summary], max_length=max_output_len, pad_to_max_length=True, truncation=True,
+        encoded_output = self.tokenizer([summary], max_length=MAX_OUTPUT_LEN, pad_to_max_length=True, truncation=True,
                                         padding="max_length", return_tensors="pt")
         input_ids = encoded_input['input_ids'].squeeze()
         input_mask = encoded_input['attention_mask'].squeeze()
@@ -78,7 +81,7 @@ def validate(model: T5ForConditionalGeneration, test_loader: DataLoader, tokeniz
             predicted_ids = model.generate(
                 input_ids=input_ids,
                 attention_mask=input_mask,
-                max_length=max_output_len
+                max_length=MAX_OUTPUT_LEN
             )
             predictions_ = [tokenizer.decode(g, skip_special_tokens=True, clean_up_tokenization_spaces=True)
                             for g in predicted_ids]
@@ -93,52 +96,84 @@ def validate(model: T5ForConditionalGeneration, test_loader: DataLoader, tokeniz
     return predictions, targets, texts
 
 
-def main():
-    torch.manual_seed(random_seed)
-    np.random.seed(random_seed)
-
-    tokenizer = T5Tokenizer.from_pretrained(t5_model, model_max_length=max_input_len)
-
+def get_max_token_numbers_from_training_data():
     with open("training_data.json", "r") as f:
         data = json.load(f)
     df = pd.DataFrame.from_records(data)
-    # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    device = torch.device('cpu')
+    tokenizer = T5Tokenizer.from_pretrained(MODEL_NAME)
+    review_lens = []
+    summary_lens = []
+    for i, row in df.iterrows():
+        review = row['review']
+        summary = row['summary']
+        rev_len = len(tokenizer.encode(review, max_length=5000))
+        sum_len = len(tokenizer.encode(summary, max_length=500))
+        review_lens.append(rev_len)
+        summary_lens.append(sum_len)
+    rev_max = max(review_lens)
+    sum_max = max(summary_lens)
 
-    epochs = 3
-    batch_size = 8
-    lr = 1e-4
-    train_frac = 0.8
+    print(f"Longest review: {rev_max} tokens")
+    print(f"Longest summary: {sum_max} tokens")
+    print("======================================")
 
-    train_df, test_df = train_test_split(df, train_size=train_frac, random_state=random_seed)
 
-    model = T5ForConditionalGeneration.from_pretrained(t5_model).to(device)
-    train_dataset = ReviewsDataset(train_df, tokenizer)
-    test_dataset = ReviewsDataset(test_df, tokenizer)
-
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
-
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-
-    train(epochs, model, device, train_loader, optimizer, tokenizer.pad_token_id)
+def save_model(model, train_df_len: int):
+    today = dt.now()
+    dt_now_str = f"{today.year}{today.month}{today.day}"
+    model_name = f"{train_df_len}_{dt_now_str}_{MAX_OUTPUT_LEN}_{EPOCHS}.pt"
     try:
-        torch.save(model, f"{len(df)}_model_w_prefix_{max_output_len}_output.pt")
-        # torch.save(model.state_dict(), "first_model_state_dict_w_prefix.pth")
-    except:
-        print(":(")
-    # model.save_pretrained()
-    # tokenizer.save_pretrained()
+        print(f"Saving {model_name}")
+        torch.save(model, "models//" + model_name)
+    except Exception as er:
+        print(f"Failed to save {model_name}: {er}")
 
-    # model = torch.load("first_model_w_prefix.pt")
 
+def load_and_maybe_split_data(split: bool = True) -> tuple:
+    with open("training_data.json", "r") as f:
+        data = json.load(f)
+    df = pd.DataFrame.from_records(data)
+    if split:
+        train_df, test_df = train_test_split(df, train_size=TRAIN_FRACTION, random_state=RANDOM_SEED)
+    else:
+        train_df, test_df = df, None
+    return train_df, test_df
+
+
+def print_test_results(model: T5ForConditionalGeneration, tokenizer: T5Tokenizer, test_data: ReviewsDataset, device):
+    test_loader = DataLoader(test_data, batch_size=BATCH_SIZE, shuffle=False)
     predictions, targets, texts = validate(model, test_loader, tokenizer, device)
+
     for pred, tar in zip(predictions, targets):
         print(f"Target: {tar}\nPredicted: {pred}")
         print("\n")
 
 
+def main():
+    torch.manual_seed(RANDOM_SEED)
+    tokenizer = T5Tokenizer.from_pretrained(MODEL_NAME, model_max_length=MAX_INPUT_LEN)
+    device = torch.device('cpu')
+
+    lr = 1e-4
+
+    train_df, test_df = load_and_maybe_split_data()
+
+    model = T5ForConditionalGeneration.from_pretrained(MODEL_NAME).to(device)
+
+    train_dataset = ReviewsDataset(train_df, tokenizer)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    train(EPOCHS, model, device, train_loader, optimizer, tokenizer.pad_token_id)
+    save_model(model, len(train_df))
+
+    if test_df:
+        test_dataset = ReviewsDataset(test_df, tokenizer)
+        print_test_results(model, tokenizer, test_dataset, device)
+
+
 if __name__ == "__main__":
     start = time.time()
+    get_max_token_numbers_from_training_data()
     main()
-    print(f"Time taken: {time.time() - start}")
+    print("Time taken: {0:.2f} s".format(time.time() - start))
