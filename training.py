@@ -126,10 +126,6 @@ def main():
     train(EPOCHS, model, device, train_loader, optimizer, tokenizer.pad_token_id)
     save_model(model, len(train_df))
 
-    # if test_df is not None:
-    #     test_dataset = ReviewsDataset(test_df, tokenizer, com.MAX_INPUT_LEN, com.MAX_OUTPUT_LEN)
-    #     print_test_results(model, tokenizer, test_dataset, device)
-
 
 if __name__ == "__main__":
     start = time.time()
